@@ -4930,8 +4930,8 @@ X.B(E,Y);return E}return J}())
                             const nx = x + dx;
                             const ny = y + dy;
                             if(nx>=0 && nx<width && ny>=0 && ny<height) {
-                                // 只要梯度超过 5 (很小的微弱变化)，就计入密度
-                                if(mag[ny*width+nx] > 5.0) count++;
+                                // 只要梯度 > 2.0 (降低阈值以捕获更多细节)，就算作纹理点
+                                if(mag[ny*width+nx] > 2.0) count++;
                             }
                         }
                     }
@@ -5071,7 +5071,9 @@ X.B(E,Y);return E}return J}())
             
             const backgroundLambda = 200.0; // 增强背景约束
             const omega = 1.8; 
-            const bgThreshold = 10; 
+            // 修正：v10版遗留问题。原阈值 10 导致暗色物体（如黑发）被强制视为背景而抹平。
+            // 现大幅降低至 1，仅对纯黑背景生效。
+            const bgThreshold = 1; 
             
             // 预计算 lambda map 和梯度权重 map
             const lambdaMap = new Float32Array(width * height);
