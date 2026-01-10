@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>智能法线贴图生成与3D转换 Pro (Terrain+ 已更新)</title>
+    <title>智能法线贴图生成与3D转换 Pro (修复版 v1.1)</title>
     <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/build/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/examples/js/controls/OrbitControls.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/examples/js/exporters/STLExporter.js"></script>
@@ -631,6 +631,8 @@
     </div>
 
     <script>
+        console.log("Version: Fix-LowHeight-Hole-v1.1");
+        // ... existing code ...
         // ================= 全局变量 =================
         let scene, camera, renderer, controls;
         let currentMesh = null;
@@ -1593,19 +1595,35 @@
                     let finalZ_base = normalizedH; 
                     // let physicalZ = finalZ_base * targetZ; // 不再使用计算后的高度来做阈值判断
                     
-                    // [修正] 使用原始图像亮度作为“底板噪点消除”的依据
-                    // 解决问题：平滑物体（如树干）虽然梯度小导致 Poisson 重建高度低，但原图是有亮度的，不应被当做噪点抹除。
+                    // [最终修正] 彻底解耦物理高度与去噪阈值
+                    // 问题根源：之前的逻辑中，去噪判断依赖于 "物理高度 = 亮度 * Z轴缩放"。
+                    // 当用户把 Z轴缩放(targetZ) 调得很小时，计算出的物理高度也会变小，
+                    // 导致原本应该保留的细节（如马蹄）低于阈值(floorThreshold)而被抹平。
+                    
+                    // 解决方案：将 floorThreshold (mm) 映射为一个固定的“亮度阈值 (0-255)”。
+                    // 我们假设 floorThreshold 是针对一个“标准参考高度” (StandardZ = 50mm) 设定的。
+                    // 这样，无论用户怎么调节实际的 Z轴缩放，去噪的亮度标准都保持不变。
+                    // 例子：默认阈值 0.05mm 对应标准高度 50mm -> 亮度阈值 ≈ 0.25 (非常低，仅去除纯黑底噪)。
+                    //       最大阈值 0.5mm  对应标准高度 50mm -> 亮度阈值 ≈ 2.5 (去除深灰噪点)。
+                    
+                    const StandardZ = 50.0; 
+                    const brightnessThreshold = (floorThreshold / StandardZ) * 255.0;
+                    
+                    // 计算像素亮度 (0-255)
                     const r = workData.data[idx * 4];
                     const g = workData.data[idx * 4 + 1];
                     const b = workData.data[idx * 4 + 2];
                     const brightness = (r * 0.299 + g * 0.587 + b * 0.114);
                     
-                    // 计算该像素在“原图亮度”意义下的物理高度
-                    const original_physical_height = (brightness / 255.0) * targetZ;
-                    
-                    // 如果原图亮度对应的高度低于阈值，才认为是底板噪点并抹平
-                    if (original_physical_height < floorThreshold) {
+                    // 仅当亮度低于阈值时，才认为是噪点
+                    if (brightness < brightnessThreshold) {
                         finalZ_base = 0.0;
+                    } else {
+                        // [关键修复] 防止有效内容的最低点（如背景平面）恰好为 0 而被误删
+                        // 如果 finalZ_base 为 0 但亮度足够，我们给它一个极小的偏移量
+                        if (finalZ_base === 0.0) {
+                            finalZ_base = 0.001; 
+                        }
                     }
                     
                     return { z: finalZ_base, h: normalizedH };
@@ -1737,8 +1755,34 @@
                     const p10 = getPos(x1, y0);
                     
                     const deleteZero = document.getElementById('optDeleteZero').checked;
+                    
+                    // [修正] 如果启用了 "删除零平面"，则不生成高度为 0 的三角形
+                    // 修正2：之前的逻辑中，getZInfo 可能会因为亮度过低而返回 0。
+                    // 但是，如果只是部分顶点为 0，而其他顶点不为 0，我们还是应该生成这个面，
+                    // 否则会在非零和零的交界处产生“破洞”或者“锯齿”。
+                    // 只有当一个面的 4 个顶点全部为 0 时，才应该跳过。
+                    
+                    // 但是，为了彻底解决“被抹平”的问题，我们应该检查这里的判断条件。
+                    // 如果用户没有勾选 "删除零平面"，那么即使是 0 也会生成。
+                    
+                    // 关键检查：如果整个 Quad 都在“地板阈值”以下，才跳过。
+                    // 但这里的阈值已经在 getZInfo 里处理过了（变成 0 了）。
+                    
                     if (deleteZero) {
-                        if (p00.z === 0 && p01.z === 0 && p11.z === 0 && p10.z === 0) return;
+                         if (p00.z === 0 && p01.z === 0 && p11.z === 0 && p10.z === 0) {
+                             // [安全检查] 即使4个角都是0，中间可能还有微小细节（如马蹄）
+                             // 防止因为网格优化采样不足导致的“破洞”
+                             const xc = (x0 + x1) / 2;
+                             const yc = (y0 + y1) / 2;
+                             
+                             // 检查中心点
+                             if (getZ(xc, yc) !== 0) {
+                                 // 发现内部有细节，强制保留（不删除）
+                             } else {
+                                 // 再多检查几个点？(可选，但这已经能捕获大部分情况)
+                                 return;
+                             }
+                         }
                     }
 
                     pushVert(p00); pushVert(p01); pushVert(p11);
